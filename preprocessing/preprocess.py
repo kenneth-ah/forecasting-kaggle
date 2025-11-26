@@ -97,6 +97,18 @@ def preprocess_data(train_path, output_dir, seq_length=4):
         historical_values = item_data['search_volume'].values.astype(np.float32)
         
         # Calculate statistics
+        # Determine peak seasonality (when does item reach maximum?)
+        peak_idx = np.argmax(historical_values)
+        peak_month = item_data.iloc[peak_idx]['date'].month
+        
+        # Classify peak season: winter (Dec-Feb: 12,1,2), summer (Jun-Aug: 6,7,8), or other
+        if peak_month in [12, 1, 2]:
+            peak_season = 'winter'
+        elif peak_month in [6, 7, 8]:
+            peak_season = 'summer'
+        else:
+            peak_season = 'other'
+        
         stats = {
             'item_id': int(item_id),
             'data_points': len(historical_values),
@@ -104,6 +116,8 @@ def preprocess_data(train_path, output_dir, seq_length=4):
             'std': float(historical_values.std()),
             'min': float(historical_values.min()),
             'max': float(historical_values.max()),
+            'peak_month': int(peak_month),
+            'peak_season': peak_season,
         }
         statistics.append(stats)
         
