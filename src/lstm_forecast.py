@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 import os
+import pickle
 from datetime import datetime, timedelta
 import warnings
 warnings.filterwarnings('ignore')
@@ -21,20 +22,24 @@ def create_sequences(data, seq_length):
         y.append(data[i + seq_length])
     return np.array(X), np.array(y)
 
-def lstm_forecast(train_path, output_path, forecast_weeks=None, seq_length=4):
+def lstm_forecast(preprocessed_data_path, scalers_path, output_path, forecast_weeks=None):
     """
-    LSTM-based forecasting model for search volume prediction.
+    LSTM-based forecasting model using preprocessed data.
     
     Args:
-        train_path: Path to training data CSV
+        preprocessed_data_path: Path to preprocessed_sequences.pkl
+        scalers_path: Path to scalers.pkl
         output_path: Path where the submission CSV will be saved
         forecast_weeks: List of weeks to forecast
-        seq_length: Number of previous weeks to use for prediction (default: 4)
     """
     
-    # Read training data
-    df = pd.read_csv(train_path)
-    df['date'] = pd.to_datetime(df['Week'])
+    # Load preprocessed data and scalers
+    print("Loading preprocessed data...")
+    with open(preprocessed_data_path, 'rb') as f:
+        preprocessed_data = pickle.load(f)
+    
+    with open(scalers_path, 'rb') as f:
+        scalers = pickle.load(f)
     
     # Define forecast weeks for July-August 2025
     if forecast_weeks is None:
@@ -46,7 +51,7 @@ def lstm_forecast(train_path, output_path, forecast_weeks=None, seq_length=4):
     forecast_weeks = pd.to_datetime(forecast_weeks)
     
     submission_rows = []
-    items = df['item_id'].unique()
+    items = list(preprocessed_data.keys())
     
     print(f"Training LSTM model on {len(items)} items...")
     
@@ -54,50 +59,35 @@ def lstm_forecast(train_path, output_path, forecast_weeks=None, seq_length=4):
         if (idx + 1) % 20 == 0:
             print(f"  Processing item {idx + 1}/{len(items)}...")
         
-        item_data = df[df['item_id'] == item_id].copy()
-        item_data = item_data.sort_values('date')
+        item_id_int = int(item_id)
         
-        # Get historical data
-        historical_values = item_data['search_volume'].values.astype(np.float32)
-        
-        if len(historical_values) < seq_length:
-            # Not enough data, use simple fallback
-            item_avg = historical_values.mean()
-            for forecast_date in forecast_weeks:
-                submission_rows.append({
-                    'id': f"{forecast_date.strftime('%Y-%m-%d')}{int(item_id)}",
-                    'Week': forecast_date.strftime('%d-%m-%Y'),
-                    'item_id': int(item_id),
-                    'search_volume_forecast': max(0, min(100, int(item_avg)))
-                })
+        # Skip if item not in preprocessed data
+        if item_id not in preprocessed_data:
             continue
         
         try:
-            # Normalize data
-            scaler = MinMaxScaler(feature_range=(0, 1))
-            scaled_data = scaler.fit_transform(historical_values.reshape(-1, 1)).flatten()
-            
-            # Create sequences
-            X_train, y_train = create_sequences(scaled_data, seq_length)
+            # Get preprocessed data
+            X_train = preprocessed_data[item_id]['X_train']
+            y_train = preprocessed_data[item_id]['y_train']
+            last_sequence = preprocessed_data[item_id]['last_sequence']
+            historical_values = preprocessed_data[item_id]['historical_values']
+            scaler = scalers[item_id]
             
             if len(X_train) < 2:
                 # Not enough sequences, use average
                 item_avg = historical_values.mean()
                 for forecast_date in forecast_weeks:
                     submission_rows.append({
-                        'id': f"{forecast_date.strftime('%Y-%m-%d')}{int(item_id)}",
+                        'id': f"{forecast_date.strftime('%Y-%m-%d')}{item_id_int}",
                         'Week': forecast_date.strftime('%d-%m-%Y'),
-                        'item_id': int(item_id),
+                        'item_id': item_id_int,
                         'search_volume_forecast': max(0, min(100, int(item_avg)))
                     })
                 continue
             
-            # Reshape for LSTM [samples, timesteps, features]
-            X_train = X_train.reshape((X_train.shape[0], X_train.shape[1], 1))
-            
             # Build LSTM model
             model = Sequential([
-                LSTM(32, activation='relu', input_shape=(seq_length, 1), return_sequences=False),
+                LSTM(32, activation='relu', input_shape=(X_train.shape[1], 1), return_sequences=False),
                 Dropout(0.1),
                 Dense(8, activation='relu'),
                 Dense(1)
@@ -109,11 +99,11 @@ def lstm_forecast(train_path, output_path, forecast_weeks=None, seq_length=4):
             model.fit(X_train, y_train, epochs=10, batch_size=8, verbose=0)
             
             # Generate forecasts for each week
-            current_sequence = scaled_data[-seq_length:].copy()
+            current_sequence = last_sequence.copy()
             
             for forecast_date in forecast_weeks:
                 # Predict next value
-                X_pred = current_sequence.reshape(1, seq_length, 1)
+                X_pred = current_sequence.reshape(1, len(current_sequence), 1)
                 scaled_pred = model.predict(X_pred, verbose=0)[0, 0]
                 
                 # Inverse transform
@@ -121,9 +111,9 @@ def lstm_forecast(train_path, output_path, forecast_weeks=None, seq_length=4):
                 forecast_value = max(0, min(100, int(forecast_value)))
                 
                 submission_rows.append({
-                    'id': f"{forecast_date.strftime('%Y-%m-%d')}{int(item_id)}",
+                    'id': f"{forecast_date.strftime('%Y-%m-%d')}{item_id_int}",
                     'Week': forecast_date.strftime('%d-%m-%Y'),
-                    'item_id': int(item_id),
+                    'item_id': item_id_int,
                     'search_volume_forecast': forecast_value
                 })
                 
@@ -136,14 +126,15 @@ def lstm_forecast(train_path, output_path, forecast_weeks=None, seq_length=4):
         except Exception as e:
             print(f"  Warning: Error processing item {item_id}: {str(e)}")
             # Fallback to average
-            item_avg = historical_values.mean()
-            for forecast_date in forecast_weeks:
-                submission_rows.append({
-                    'id': f"{forecast_date.strftime('%Y-%m-%d')}{int(item_id)}",
-                    'Week': forecast_date.strftime('%d-%m-%Y'),
-                    'item_id': int(item_id),
-                    'search_volume_forecast': max(0, min(100, int(item_avg)))
-                })
+            if item_id in preprocessed_data:
+                item_avg = preprocessed_data[item_id]['historical_values'].mean()
+                for forecast_date in forecast_weeks:
+                    submission_rows.append({
+                        'id': f"{forecast_date.strftime('%Y-%m-%d')}{item_id_int}",
+                        'Week': forecast_date.strftime('%d-%m-%Y'),
+                        'item_id': item_id_int,
+                        'search_volume_forecast': max(0, min(100, int(item_avg)))
+                    })
     
     # Create and save submission
     submission_df = pd.DataFrame(submission_rows)
@@ -163,12 +154,20 @@ def lstm_forecast(train_path, output_path, forecast_weeks=None, seq_length=4):
     print(f"Std Dev: {submission_df['search_volume_forecast'].std():.2f}")
 
 if __name__ == "__main__":
-    train_file = os.path.join(
+    preprocessed_data_file = os.path.join(
         os.path.dirname(__file__),
         "..",
-        "data",
-        "train.csv"
+        "preprocessed_data",
+        "preprocessed_sequences.pkl"
     )
+    
+    scalers_file = os.path.join(
+        os.path.dirname(__file__),
+        "..",
+        "preprocessed_data",
+        "scalers.pkl"
+    )
+    
     output_file = os.path.join(
         os.path.dirname(__file__),
         "..",
@@ -176,4 +175,4 @@ if __name__ == "__main__":
         "lstm_submission.csv"
     )
     
-    lstm_forecast(train_file, output_file)
+    lstm_forecast(preprocessed_data_file, scalers_file, output_file)
