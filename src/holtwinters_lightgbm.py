@@ -26,6 +26,12 @@ def create_time_features(df):
     df['week_sin'] = np.sin(2 * np.pi * df['week'] / 52)
     df['week_cos'] = np.cos(2 * np.pi * df['week'] / 52)
 
+    # NEW: Add December indicator
+    df['is_december'] = (df['month'] == 12).astype(int)
+
+    # NEW: Add summer indicator (July or August)
+    df['is_summer'] = df['month'].isin([7, 8]).astype(int)
+
     return df
 
 def create_lag_features(df, item_id, lags=[1, 2, 3, 4, 8, 12, 52]):

@@ -11,6 +11,13 @@ def load_raw_data(train_path):
     """Load raw training data"""
     df = pd.read_csv(train_path)
     df['date'] = pd.to_datetime(df['Week'])
+
+    # Add December indicator
+    df['is_december'] = (df['date'].dt.month == 12).astype(int)
+
+    # Add summer indicator (July or August)
+    df['is_summer'] = df['date'].dt.month.isin([7, 8]).astype(int)
+
     return df
 
 def handle_null_values(df):
